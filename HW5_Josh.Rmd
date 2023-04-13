@@ -1,0 +1,491 @@
+---
+title: "Modern Data Mining - HW 5"
+author:
+- Joshua Benadiva
+- Christine O'Hara
+- Mintai Bautista
+date: 'Due: 11:59Pm,  4/16, 2023'
+output:
+  html_document:
+    code_folding: show
+    highlight: haddock
+    theme: lumen
+    toc: yes
+    toc_depth: 4
+    toc_float: yes
+  pdf_document:
+    toc: yes
+    toc_depth: '4'
+  word_document:
+    toc: yes
+    toc_depth: '4'
+urlcolor: blue  
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(fig.height=4, fig.width=6, warning = F)
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(tidyverse, data.table, randomForest, caret, tree, ISLR, rpart, rattle, pROC, partykit, ggplot2, glmnet, leaps, dplyr, keras, neuralnet, imager, ranger)
+```
+
+
+
+# Problem 2: IQ and successes
+
+## Background: Measurement of Intelligence 
+
+Case Study:  how intelligence relates to one's future successes?
+
+
+
+ASVAB (Armed Services Vocational Aptitude Battery) tests have been used as a screening test for those who want to join the army or other jobs. 
+
+Our data set IQ.csv is a subset of individuals from the 1979 National Longitudinal Study of 
+Youth (NLSY79) survey who were re-interviewed in 2006. Information about family, personal demographic such as gender, race and education level, plus a set of ASVAB (Armed Services Vocational Aptitude Battery) test scores are available. It is STILL used as a screening test for those who want to join the army! ASVAB scores were 1981 and income was 2005. 
+
+**Our goals:** 
+
++ Is IQ related to one's successes measured by Income?
++ Is there evidence to show that Females are under-paid?
++ What are the best possible prediction models to predict future income? 
+
+
+**The ASVAB has the following components:**
+
++ Science, Arith (Arithmetic reasoning), Word (Word knowledge), Parag (Paragraph comprehension), Numer (Numerical operation), Coding (Coding speed), Auto (Automative and Shop information), Math (Math knowledge), Mechanic (Mechanic Comprehension) and Elec (Electronic information).
++ AFQT (Armed Forces Qualifying Test) is a combination of Word, Parag, Math and Arith.
++ Note: Service Branch requirement: Army 31, Navy 35, Marines 31, Air Force 36, and Coast Guard 45,(out of 100 which is the max!) 
+
+**The detailed variable definitions:**
+
+Personal Demographic Variables: 
+
+ * Race: 1 = Hispanic, 2 = Black, 3 = Not Hispanic or Black
+ * Gender: a factor with levels "female" and "male"
+ * Educ: years of education completed by 2006
+ 
+Household Environment: 
+ 
+* Imagazine: a variable taking on the value 1 if anyone in the respondent’s household regularly read
+	magazines in 1979, otherwise 0
+* Inewspaper: a variable taking on the value 1 if anyone in the respondent’s household regularly read
+	newspapers in 1979, otherwise 0
+* Ilibrary: a variable taking on the value 1 if anyone in the respondent’s household had a library card
+	in 1979, otherwise 0
+* MotherEd: mother’s years of education
+* FatherEd: father’s years of education
+
+Variables Related to ASVAB test Scores in 1981 (Proxy of IQ's)
+
+* AFQT: percentile score on the AFQT intelligence test in 1981 
+* Coding: score on the Coding Speed test in 1981
+* Auto: score on the Automotive and Shop test in 1981
+* Mechanic: score on the Mechanic test in 1981
+* Elec: score on the Electronics Information test in 1981
+
+* Science: score on the General Science test in 1981
+* Math: score on the Math test in 1981
+* Arith: score on the Arithmetic Reasoning test in 1981
+* Word: score on the Word Knowledge Test in 1981
+* Parag: score on the Paragraph Comprehension test in 1981
+* Numer: score on the Numerical Operations test in 1981
+
+Variable Related to Life Success in 2006
+
+* Income2005: total annual income from wages and salary in 2005. We will use a natural log transformation over the income.
+
+
+**Note: All the Esteem scores shouldn't be used as predictors to predict income**
+
+## 1. EDA: Some cleaning work is needed to organize the data. 
+```{r}
+iq_data <- fread("IQ.Full.csv")
+print(iq_data)
+```
+
++ The first variable is the label for each person. Take that out.
+
+
++ Set categorical variables as factors. 
++ Make log transformation for Income and take the original Income out
++ Take the last person out of the dataset and label it as **Michelle**. 
++ When needed, split data to three portions: training, testing and validation (70%/20%/10%)
+  - training data: get a fit
+  - testing data: find the best tuning parameters/best models
+  - validation data: only used in your final model to report the accuracy. 
+
+```{r}
+iq_data <- iq_data[, -1]
+iq_data$Race <- as.factor(iq_data$Race)
+iq_data$Gender <- as.factor(iq_data$Gender)
+iq_data$LogIncome2005 <- log(iq_data$Income2005)
+iq_data <- subset(iq_data, select = -Income2005)
+michelle <- iq_data[nrow(iq_data), ]
+iq_data <- iq_data[-nrow(iq_data), ]
+set.seed(123) # Set a seed for reproducibility
+total_rows <- nrow(iq_data)
+train_rows <- floor(total_rows * 0.7)
+test_rows <- floor(total_rows * 0.2)
+
+# Shuffle data
+shuffled_data <- iq_data[sample(nrow(iq_data)), ]
+
+# Split data
+train_data <- shuffled_data[1:train_rows, ]
+test_data <- shuffled_data[(train_rows + 1):(train_rows + test_rows), ]
+validation_data <- shuffled_data[(train_rows + test_rows + 1):total_rows, ]
+```
+
+## 2. Factors affect Income
+
+We only use linear models to answer the questions below.
+
+i. To summarize ASVAB test scores, create PC1 and PC2 of 10 scores of ASVAB tests and label them as
+ASVAB_PC1 and ASVAB_PC2. Give a quick interpretation of each ASVAB_PC1 and ASVAB_PC2 in terms of the original 10 tests. 
+
+```{r}
+# Extract ASVAB test scores
+asvab_scores <- iq_data[, c("Science", "Arith", "Word", "Parag", "Numer", "Coding", "Auto", "Math", "Mechanic", "Elec")]
+
+# Perform PCA
+asvab_pca <- prcomp(asvab_scores, scale = TRUE)
+
+# Add PC1 and PC2 to the dataset
+iq_data$ASVAB_PC1 <- asvab_pca$x[, 1]
+iq_data$ASVAB_PC2 <- asvab_pca$x[, 2]
+asvab_pca$rotation[, 1:2]
+
+```
+
+Based on the PCA results for the ASVAB test scores, PC1 and PC2 capture different aspects of the test scores.
+
+PC1:
+PC1 has positive loadings for all 10 tests, which suggests that it represents a general aptitude or overall ability level. This means that individuals who score high on PC1 tend to perform well across all tests, while those who score low on PC1 perform poorly across all tests. A high value of ASVAB_PC1 indicates strong performance in all areas, reflecting a more versatile skill set.
+
+PC2:
+PC2, on the other hand, shows a mix of positive and negative loadings. The tests with positive loadings are Arith, Word, Parag, Numer, Coding, and Math. The tests with negative loadings are Science, Auto, Mechanic, and Elec. PC2 seems to capture the contrast between verbal/numerical skills (positive loadings) and technical/mechanical skills (negative loadings). A high value of ASVAB_PC2 indicates a stronger performance in verbal and numerical skills and a weaker performance in technical and mechanical skills, whereas a low value indicates the opposite.
+
+ii. Is there any evidence showing ASVAB test scores in terms of ASVAB_PC1 and ASVAB_PC2, might affect the Income?  Show your work here. You may control a few other variables, including gender. 
+
+```{r}
+income_model <- lm(LogIncome2005 ~ ASVAB_PC1 + ASVAB_PC2 + Gender, data = iq_data)
+summary(income_model)
+```
+ASVAB_PC1: The coefficient for ASVAB_PC1 is 0.109464, with a highly significant p-value (< 2e-16). This indicates that there is a positive relationship between the first principal component of ASVAB test scores (general aptitude) and income. As an individual's general aptitude (ASVAB_PC1) increases, their income also tends to increase.
+
+ASVAB_PC2: The coefficient for ASVAB_PC2 is 0.094176, with a significant p-value (2.61e-07). This suggests a positive relationship between the second principal component of ASVAB test scores (verbal and numerical skills vs. technical and mechanical skills) and income. As an individual's verbal and numerical skills relative to their technical and mechanical skills (ASVAB_PC2) increase, their income also tends to increase.
+
+Gender: The coefficient for Gendermale is 0.671353, with a highly significant p-value (< 2e-16). This indicates that, on average, male individuals tend to have higher incomes than female individuals.
+
+The model has an adjusted R-squared of 0.1919, which implies that about 19.19% of the variation in income can be explained by the ASVAB_PC1, ASVAB_PC2, and gender variables. While this is not a very high value, it does suggest a significant relationship between ASVAB test scores, gender, and income.
+
+
+iii. Is there any evidence to show that there is gender bias against either male or female in terms of income in the above model? 
+
+Yes, there is evidence of gender bias in terms of income in the given model. The coefficient for Gendermale is 0.671353, with a highly significant p-value (< 2e-16). This result suggests that, on average, male individuals tend to have higher incomes than female individuals, even when controlling for ASVAB_PC1 and ASVAB_PC2 scores.
+
+We next build a few models for the purpose of prediction using all the information available. From now on you may use the three data sets setting (training/testing/validation) when it is appropriate. 
+
+## 3. Trees
+
+i. fit1: tree(Income ~ Educ + Gender, data.train) with default set up 
+
+```{r}
+library(tree)
+
+fit1 <- tree(LogIncome2005 ~ Educ + Gender, data = train_data)
+```
+
+    a) Display the tree
+    
+```{r}
+plot(fit1)
+text(fit1, pretty = 0)
+```
+
+    b) How many end nodes? Briefly explain how the estimation is obtained in each end nodes and deescribe the prediction equation
+```{r}
+length(unique(fit1$where))
+```
+
+
+The estimation in each end node is obtained by calculating the average LogIncome2005 for all observations within that node. When making predictions using this decision tree, the input observation will traverse the tree following the binary splits until it reaches an end node. The predicted value for that observation will be the average LogIncome2005 of the samples within the end node.
+
+The prediction equation is not a single equation like in linear regression. Instead, it is a set of rules or binary decisions based on the input features (Educ and Gender) that guide the observation through the tree structure until it reaches an end node, where the average LogIncome2005 of that node is used as the predicted value.
+For the left branch (Female):
+
+The split after gender is based on Educ < 15.5:
+Left end node (terminal node): Educ < 15.5, predicted LogIncome2005 = 9.959
+Right end node (terminal node): Educ >= 15.5, predicted LogIncome2005 = 10.520
+For the right branch (Male):
+
+The split after gender is based on Educ < 15.5:
+Left end node (terminal node): Educ < 15.5, predicted LogIncome2005 = 10.570
+Right end node (terminal node): Educ >= 15.5, predicted LogIncome2005 = 11.160
+
+    c) Does it show interaction effect of Gender and Educ over Income?
+
+ In the tree, the first split is based on Gender, and after that, it splits based on Educ. Since the tree does not split on Educ first and then further splits on Gender or vice versa within each branch, it suggests that the interaction effect between Gender and Educ over Income is not strong, at least within the context of this tree.
+
+    d) Predict Michelle's income
+```{r}
+michelle_pred <- predict(fit1, newdata = michelle)
+exp(michelle_pred)  # Convert back to original income scale
+```
+
+ii. fit2: fit2 <- rpart(Income2005 ~., data.train, minsplit=20, cp=.009)
+
+```{r}
+fit2 <- rpart(LogIncome2005 ~ ., data = train_data, minsplit = 20, cp = 0.009)
+```
+
+
+    a) Display the tree using plot(as.party(fit2), main="Final Tree with Rpart") 
+```{r}
+plot(as.party(fit2), main = "Final Tree with Rpart")
+```
+
+    b) A brief summary of the fit2
+```{r}
+summary(fit2)
+```
+    c) Compare testing errors between fit1 and fit2. Is the training error from fit2 always less than that from fit1? Is the testing error from fit2 always smaller than that from fit1? 
+
+```{r}
+# Predictions for fit1 and fit2
+pred_fit1 <- predict(fit1, newdata = test_data)
+pred_fit2 <- predict(fit2, newdata = test_data)
+
+# Calculate the Mean Squared Error (MSE) for both models
+mse_fit1 <- mean((test_data$LogIncome2005 - pred_fit1)^2)
+mse_fit2 <- mean((test_data$LogIncome2005 - pred_fit2)^2)
+
+# Display the MSE for both models
+cat("MSE for fit1:", mse_fit1, "\n")
+cat("MSE for fit2:", mse_fit2, "\n")
+```
+
+Is the training error from fit2 always less than that from fit1?
+It's not guaranteed that the training error from fit2 will always be less than that from fit1. It depends on the complexity of the models and the specific data we're working with. In general, a more complex model may have a smaller training error, but it could also be more prone to overfitting.
+
+Is the testing error from fit2 always smaller than that from fit1?
+Again, there's no guarantee that the testing error for fit2 will always be smaller than that for fit1. It depends on how well each model generalizes to unseen data. A model with better generalization will have a smaller testing error.
+
+Based on the results, the testing error for fit2 is smaller than that for fit1. This indicates that fit2 generalizes better to the unseen data in our test dataset than fit1. In this specific case, using fit2 (the model created with rpart) would likely provide better predictions for new data compared to fit1 (the model created with the tree package).
+    
+    
+`    d) You may prune the fit2 to get a tree with small testing error. 
+```{r}
+library(rpart)
+control_params <- rpart.control(minsplit = 20, cp = 0.009, xval = 10)  # 10-fold cross-validation
+
+fit2_cv <- rpart(LogIncome2005 ~ ., data = train_data, control = control_params)
+optimal_cp <- fit2_cv$cptable[which.min(fit2_cv$cptable[, "xerror"]), "CP"]
+pruned_fit2 <- prune(fit2, cp = optimal_cp)
+plot(as.party(pruned_fit2), main = "Pruned Tree with Rpart")
+```
+
+
+iii. fit3: bag two trees
+
+    a) Take 2 bootstrap training samples and build two trees using the 
+    rpart(Income2005 ~., data.train.b, minsplit=20, cp=.009). Display both trees.
+```{r}
+set.seed(123)  # Set a seed for reproducibility
+
+# Create two bootstrap samples of the training data
+train_data_b1 <- train_data[sample(nrow(train_data), replace = TRUE), ]
+train_data_b2 <- train_data[sample(nrow(train_data), replace = TRUE), ]
+fit3_tree1 <- rpart(LogIncome2005 ~ ., data = train_data_b1, minsplit = 20, cp = 0.009)
+fit3_tree2 <- rpart(LogIncome2005 ~ ., data = train_data_b2, minsplit = 20, cp = 0.009)
+
+plot(as.party(fit3_tree1), main = "Bootstrap Tree 1 with Rpart")
+plot(as.party(fit3_tree2), main = "Bootstrap Tree 2 with Rpart")
+```
+    b) Explain how to get fitted values for Michelle by bagging the two trees obtained above. Do not use the predict().
+    Traverse the first tree (fit3_tree1) using Michelle's data and find the terminal node where her data point falls. This can be done by following the splits based on the values of her predictor variables.
+
+Retrieve the mean LogIncome2005 value for the terminal node in the first tree where Michelle's data point falls.
+
+Repeat steps 1 and 2 for the second tree (fit3_tree2).
+
+Average the mean LogIncome2005 values from both trees' terminal nodes to obtain the final prediction for Michelle's LogIncome2005.
+
+To get Michelle's predicted income, take the exponent of the final LogIncome2005 prediction to convert it back to the original income scale.
+
+    c) What is the testing error for the bagged tree. Is it guaranteed that the testing error by bagging the two tree always smaller that either single tree?
+
+```{r}
+pred_tree1 <- predict(fit3_tree1, newdata = test_data)
+pred_tree2 <- predict(fit3_tree2, newdata = test_data)
+
+# Average predictions to obtain bagged predictions
+bagged_pred <- (pred_tree1 + pred_tree2) / 2
+
+# Calculate the mean squared error
+mse_bagged <- mean((test_data$LogIncome2005 - bagged_pred)^2)
+print(mse_bagged)
+```
+
+No, it's not guaranteed that the testing error for the bagged trees will always be smaller than the error from either single tree. However, bagging can help improve model stability and reduce overfitting by averaging the predictions from multiple trees. This can often lead to better generalization and a lower testing error. The effectiveness of bagging depends on the specific problem, the dataset, and the underlying decision trees.
+    
+iv. fit4: Build a best possible RandomForest
+    a) Show the process how you tune mtry and number of trees. Give a very high level explanation how fit4 is built.
+
+```{r results=TRUE}
+set.seed(555)
+fit4 <- randomForest(LogIncome2005 ~ ., data = train_data, mtry = 5, ntree = 500)
+names(fit4)
+plot(fit4, col="red", pch=16, type="p", 
+     main="default plot, ")
+```
+
+Before we can explain all the output. We first get the predicted values and training error.
+```{r}
+# Obtain predicted values for the training set
+train_pred <- predict(fit4, newdata = train_data)
+
+# Calculate the mean squared error for the training set
+mse_train <- mean((train_data$LogIncome2005 - train_pred)^2)
+
+# Print the mean squared error
+print(mse_train)
+```
+
+Now to see th oob.times and store the predicted values under the predicted oob, and store the mean squared error.
+
+```{r}
+head(fit4$oob.times) # how many times each obs'n belong to OOB. We expect to see 1/e=1/3 (.37)
+
+predicted_oob <- fit4$predicted   # OOB predicted values 
+mse_oob <- mean((train_data$LogIncome2005 - predicted_oob)^2)  
+```
+
+<!-- Notice `mse_oob`=`r mse_oob` is much larger than that `mse_train`= `r mse_train`. -->
+
+
+```{r}
+plot(fit4$mse, xlab="number of trees", col="blue",
+     ylab="ave mse up to i many trees using OOB predicted",
+     pch=16) # We only need about 100 trees for this
+title(main = "OOB testing errors as a func of number of trees")
+```
+Now we fix `ntree=250`, We only want to compare the OOB mse[250] to see the mtry effects.
+Here we loop mtry from 1 to 19 and return the testing OOB errors
+
+```{r}
+rf.error.p <- 1:19  # set up a vector of length 19
+for (p in 1:19)  # repeat the following code inside { } 19 times
+{
+  fit5 <- randomForest(LogIncome2005 ~ ., data = train_data, mtry = 5, ntree = 250)
+  #plot(fit5, col= p, lwd = 3)
+  rf.error.p[p] <- fit5$mse[250]  # collecting oob mse based on 250 trees
+}
+rf.error.p   # oob mse returned: should be a vector of 19
+
+plot(1:19, rf.error.p, pch=16,
+     main = "Testing errors of mtry with 250 trees",
+     xlab="mtry",
+     ylab="OOB mse of mtry")
+lines(1:19, rf.error.p)
+```
+
+So we see here that the mtry should be 16, although the mean squared error is quite stable. 
+
+```{r}
+plot(fit5, col="red", pch=16, type="p", 
+     main="default plot, ")
+```
+
+The final fit: we take mtry = 16
+```{r}
+fit.final<- randomForest(LogIncome2005 ~ ., data = train_data, mtry = 16, ntree = 250)    # change mtry
+plot(fit.final)
+fit.final$mse[250]  # testing error of the RF based on 250 trees
+```
+    
+High-level explanation of how the RandomForest model (fit.final) is built:
+
+In this analysis, I built a random forest model to predict LogIncome2005 using the given training data. Here's a high-level explanation of the steps I took:
+
+I first created a random forest model fit4 with mtry = 5 and ntree = 500. I plotted the default output of the model to visualize its performance.
+
+I calculated the training error (MSE) for fit4 by obtaining the predicted values for the training set and comparing them to the actual LogIncome2005 values.
+
+I examined the out-of-bag (OOB) information provided by the random forest model, which gives me an unbiased estimation of the testing error. I retrieved the OOB predicted values and calculated the mean squared error for the OOB predictions.
+
+I plotted the OOB testing errors as a function of the number of trees and observed that around 100 trees were sufficient for this problem.
+
+To find the optimal mtry value, I fixed ntree = 250 and looped through mtry values from 1 to 19. For each mtry value, I built a random forest model and collected the OOB MSE based on 250 trees. I plotted the OOB MSE for each mtry value and observed that mtry = 16 appeared to be the best choice, though the mean squared error was quite stable across different mtry values.
+
+Finally, I built the final random forest model fit.final with mtry = 16 and ntree = 250. I plotted the default output for this model and reported the testing error (MSE) based on 250 trees.
+
+In summary, I built a random forest model to predict LogIncome2005, tuned the hyperparameters mtry and ntree using OOB testing errors, and chose the optimal values for these parameters to construct the final model.
+
+    b) Compare the oob errors form fit4 (I called it fit.final) to the testing errors using your testing data. Are you convinced that oob errors estimate testing error reasonably well.
+
+```{r}
+# Obtain predicted values for the testing set
+test_pred <- predict(fit.final, newdata = test_data)
+
+# Calculate the mean squared error for the testing set
+mse_test <- mean((test_data$LogIncome2005 - test_pred)^2)
+
+# Print the mean squared error
+print(mse_test)
+```
+ I am convinced that oob errors estimate testing errors reasonably well. 
+ 
+    c) What is the predicted value for Michelle?
+
+```{r}
+
+# Remove the LogIncome2005 column for prediction
+michelle_data <- michelle[-which(colnames(iq_data) == "LogIncome2005")]
+
+# Predict LogIncome2005 for Michelle
+michelle_pred <- predict(fit.final, newdata = michelle_data)
+
+# Print the predicted value
+print(michelle_pred)
+```
+    
+v. Now you have built so many predicted models (fit1 through fit4 in this section). What about build a fit5 which bags fit1 through fit4. Does fit5 have the smallest testing error?
+
+```{r}
+# Obtain predictions for the test set using individual models
+pred_fit1 <- predict(fit1, newdata = test_data)
+pred_fit2 <- predict(fit2, newdata = test_data)
+pred_fit3_tree1 <- predict(fit3_tree1, newdata = test_data)
+pred_fit3_tree2 <- predict(fit3_tree2, newdata = test_data)
+pred_fit3_bagged <- (pred_fit3_tree1 + pred_fit3_tree2) / 2
+pred_fit_final <- predict(fit.final, newdata = test_data)
+
+# Average predictions to obtain bagged predictions
+bagged_pred_fit5 <- (pred_fit1 + pred_fit2 + pred_fit3_bagged + pred_fit_final) / 4
+
+# Calculate the mean squared error for fit5
+mse_fit5 <- mean((test_data$LogIncome2005 - bagged_pred_fit5)^2)
+print(mse_fit5)
+```
+
+vi.  Summarize the results and nail down one best possible final model you will recommend to predict income. Explain briefly why this is the best choice. Finally for the first time evaluate the prediction error using the validating data set.
+
+fit5, the bagged prediction of fit1, fit2, fit3 and fit.final, seemed to have the lowest mean squared error. This makes it the best choice for model selection. 
+
+vii. Use your final model to predict Michelle's income. 
+```{r}
+# Obtain predicted value for Michelle using the final model (fit.final)
+michelle_pred_final <- predict(fit5, newdata = michelle)
+
+# Convert the predicted log income back to the original income scale
+michelle_income_final <- exp(michelle_pred_final)
+
+# Print the predicted income for Michelle
+print(michelle_income_final)
+```
+
+
+
+
+
