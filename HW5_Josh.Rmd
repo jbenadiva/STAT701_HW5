@@ -28,6 +28,516 @@ if (!require("pacman")) install.packages("pacman")
 pacman::p_load(tidyverse, data.table, randomForest, caret, tree, ISLR, rpart, rattle, pROC, partykit, ggplot2, glmnet, leaps, dplyr, keras, neuralnet, imager, ranger)
 ```
 
+### Problem 1 - Yelp Data
+
+## Reading in Data
+
+a) Which time period were the reviews collected in this data?
+
+2004 - 2018 
+
+b) Are ratings (with 5 levels) related to month of the year or days of the week? Only address this through EDA please.
+
+No - no obvious pattern in  ratings based on month or day of the week. 
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(fig.height=4, fig.width=6, warning = F)
+
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(randomForest, tree, ISLR, rpart, rattle, pROC, partykit, ggplot2, glmnet, leaps, dplyr, keras, neuralnet, imager, ranger, ggplot2, tm, SnowballC, RColorBrewer, wordcloud,
+               randomForest, ranger, data.table, sparsepca)
+
+yelp_data <- jsonlite::stream_in(file("yelp_review_20k.json"), verbose = F)
+str(yelp_data)
+
+# Examining year
+yelp_data$year <- substr(yelp_data$date, 1, 4)
+yelp_data$year
+str(yelp_data)
+yelp_data$year <- as.numeric(yelp_data$year)
+str(yelp_data)
+summary(yelp_data)
+yelp_data$stars <- as.factor(yelp_data$stars)
+
+# Examining month and day of week 
+weekdays <- weekdays(as.Date(yelp_data$date))
+months <- months(as.Date(yelp_data$date))
+
+par(mfrow=c(1,2))
+pie(table(weekdays), main="Prop of reviews") # Pretty much evenly distributed
+pie(table(months))
+
+prop.table(table(yelp_data$stars, weekdays), 2) # prop of the columns
+prop.table(table(yelp_data$stars, weekdays), 1) # prop of the rows
+
+prop.table(table(yelp_data$stars, months), 2) # prop of the columns
+prop.table(table(yelp_data$stars, months), 1) # prop of the rows
+```
+
+
+## Document term matrix (dtm) (bag of words)
+Extract document term matrix for texts to keep words appearing at least .5% of the time among all 20000 documents. Go through the similar process of cleansing as we did in the lecture.
+
+a) Briefly explain what does this matrix record? What is the cell number at row 100 and column 405? What does it represent?
+
+0 
+
+b) What is the sparsity of the dtm obtained here? What does that mean?
+
+97% 
+
+c) Set the stars as a two category response variable called rating to be “1” = 5,4 and “0”= 1,2,3. Combine
+the variable rating with the dtm as a data frame called data2
+
+```{r}
+data1.text <- yelp_data$text # take the text out summary(data)
+
+# Turn texts to corpus
+mycorpus1  <- VCorpus(VectorSource(data1.text))
+
+
+# Control list for creating our DTM within DocumentTermMatrix
+# Can tweak settings based off if you want punctuation, numbers, etc.
+control_list <- list( tolower = TRUE, 
+                      removePunctuation = TRUE,
+                      removeNumbers = TRUE, 
+                      stopwords = stopwords("english"), 
+                      stemming = TRUE)
+# dtm with all terms:
+dtm.10.long  <- DocumentTermMatrix(mycorpus1, control = control_list)
+#inspect(dtm.10.long)
+
+# kick out rare words 
+dtm.10<- removeSparseTerms(dtm.10.long, 1-.01)  
+inspect(dtm.10)
+as.matrix(dtm.10[100,405])
+
+```
+
+
+## LASSO
+i. Use the training data to get Lasso fit. Choose lambda.1se. Label the the fit as fit.lasso. Comment on what tuning parameters are chosen at the end and why?
+
+ii. Feed the output from Lasso above, get a logistic regression and call this fit.glm
+
+```{r}
+yelp_data$stars <- as.numeric(yelp_data$stars)
+yelp_data$rating <- if_else(yelp_data$stars <= 3, 0 , 1, missing = NULL)
+data2 <- data.frame(yelp_data$rating, as.matrix(dtm.10) )
+
+set.seed(1)  # for the purpose of reproducibility
+n <- nrow(data2)
+test.num <- 5000
+valid.num <-2000
+test.valid.indexes <- sample(n, test.num + valid.num)
+test.index <- test.valid.indexes[1:test.num] 
+valid.index <- test.valid.indexes[(test.num + 1): (test.num + valid.num)]
+
+data2.test <- data2[test.index,] 
+data2.valid <- data2[valid.index,]
+data2.train <- data2[-test.valid.indexes,]
+dim(data2.train)
+dim(data2.valid)
+dim(data2.test)
+
+#Run LASSO
+
+y <- data2.train$yelp_data.rating
+X1 <- sparse.model.matrix(yelp_data.rating~., data=data2.train)[, -1]
+set.seed(2)
+result.lasso <- cv.glmnet(X1, y, alpha=.99, family="binomial")
+plot(result.lasso)
+saveRDS(result.lasso, file="TextMining_lasso.RDS")
+result.lasso <- readRDS("TextMining_lasso.RDS")
+
+
+coef.1se <- coef(result.lasso, s="lambda.1se") 
+lasso.words <- coef.1se@Dimnames[[1]] [coef.1se@i][-1] 
+summary(lasso.words)  ## 401 lasso words
+
+#Run logistic regression
+
+sel_cols <- c("yelp_data.rating", lasso.words)
+data_sub <- data2.train %>% select(all_of(sel_cols))
+result.glm <- glm(yelp_data.rating~., family=binomial, data_sub)
+
+#strip GLM 
+
+stripGlmLR = function(cm) {
+  cm$y = c()
+  cm$model = c()
+  
+  cm$residuals = c()
+  cm$fitted.values = c()
+  cm$effects = c()
+  cm$qr$qr = c()  
+  cm$linear.predictors = c()
+  cm$weights = c()
+  cm$prior.weights = c()
+  cm$data = c()
+
+  
+  cm$family$variance = c()
+  cm$family$dev.resids = c()
+  cm$family$aic = c()
+  cm$family$validmu = c()
+  cm$family$simulate = c()
+  attr(cm$terms,".Environment") = c()
+  attr(cm$formula,".Environment") = c()
+  
+  cm
+}
+
+result.glm.small <- stripGlmLR(result.glm)
+#(result.glm.small$coefficients)
+
+saveRDS(result.glm.small, 
+     file = "TextMining_glm_small.RDS")
+
+result.glm <- readRDS("TextMining_glm_small.RDS")
+result.glm.coef <- coef(result.glm)
+result.glm.coef[200:250]
+hist(result.glm.coef)
+
+```
+
+## Create word cloud
+
+a) Pull out all the positive coefficients and the corresponding words. Rank the coefficients in a decreasing order. Report the leading 2 words and the coefficients. Describe briefly the interpretation for those two coefficients.
+
+delici - 1.5827174364 
+knowledg - 1.3037323687
+
+b) Make a word cloud with the top 100 positive words according to their coefficients. Interpret the cloud briefly.
+
+Positive word cloud contains stems of words. Delici, profession, classic, recommend show up often
+
+c) Repeat a) and b) above for the bag of negative words.
+
+worst - 3.1593784430     
+horribl - 2.3128257719
+
+d) Summarize the findings.
+
+Worst, horribl, bland, rude, poor show up often.
+
+```{r setup, include=TRUE, cache = FALSE}
+
+good.glm <- result.glm.coef[which(result.glm.coef > 0)]
+good.glm <- good.glm[-1]  # took intercept out
+names(good.glm)[1:20]  # which words are positively associated with good ratings
+
+good.fre <- sort(good.glm, decreasing = TRUE) # sort the coef's
+round(good.fre, 4)[1:20] # leading 20 positive words
+length(good.fre)  # 196 good words
+
+hist(as.matrix(good.fre), breaks=30, col="red") 
+good.word <- names(good.fre)  # good words with a decreasing order in the coeff's
+
+cor.special <- brewer.pal(8,"Dark2")  # set up a pretty color scheme
+wordcloud(good.word[1:100], good.fre[1:100],  # make a word cloud
+          colors=cor.special)
+
+#Negative word cloud
+
+bad.glm <- result.glm.coef[which(result.glm.coef < 0)]
+pr
+
+bad.fre <- sort(-bad.glm, decreasing = TRUE)
+round(bad.fre, 4)[1:40]
+length(bad.fre)
+
+hist(as.matrix(bad.fre), breaks=30, col="green")
+bad.word <- names(bad.fre)
+length(bad.word)
+print(bad.word)
+wordcloud(bad.word[1:100], bad.fre[1:100], min.freq=0, 
+          color=cor.special)
+
+```
+
+## Comparing the models 
+
+iii. What are the major differences among the two methods used so far: Lasso and glm
+
+iv. Using majority votes find the testing errors 
+
+a) From fit.lasso --> 0.14
+b) From fit.glm  --> 0.18
+c) Which one is smaller? --> LASSO is smaller
+
+
+```{r}
+predict.glm <- predict(result.glm, data2.test, type = "response")
+class.glm <- ifelse(predict.glm > .5, "1", "0")
+length(class.glm)
+
+testerror.glm <- mean(data2.test$yelp_data.rating != class.glm)
+testerror.glm   # mis classification error is 0.18
+
+pROC::roc(data2.test$yelp_data.rating, predict.glm, plot=T) # AUC=.87
+
+predict.lasso.p <- predict(result.lasso, as.matrix(data2.test[, -1]), type = "response", s="lambda.1se")
+  # output lasso estimates of prob's
+predict.lasso <- predict(result.lasso, as.matrix(data2.test[, -1]), type = "class", s="lambda.1se")
+  # output majority vote labels
+
+# LASSO testing errors
+mean(data2.test$yelp_data.rating != predict.lasso)   # .14
+
+# ROC curve for LASSO estimates is 0.93
+
+pROC::roc(data2.test$yelp_data.rating, predict.lasso.p, plot=TRUE)
+
+```
+
+## Neural network
+
+*could not get this to work* 
+
+i. Let’s specify an architecture with the following specifications
+a) One hidden layers with 20 neurons
+b) Relu activation function
+c) Softmax output
+d) Explain in a high level what is the model? How many unknown weights (parameters are there)
+
+ii. Train your model and call it fit.nn 
+a) using the training data
+b) split 85% vs. 15% internally
+c) find the optimal epoch
+
+iii. Report the testing errors using majority vote.
+
+
+```{r}
+
+devtools::install_github("rstudio/keras")
+library(keras)
+install_keras()
+
+data3 <- data2[, -c(1:3)]; dim(data3)# the first element is the rating
+names(data3)[1:3]
+levels(as.factor(data3$rating))
+
+set.seed(1)  # for the purpose of reproducibility
+n <- nrow(data3)
+.index <- sample(n, 10000)
+length(.index)   # reserve 10000
+data3_val <- data3[.index, ] # 
+##  input/y
+data3_xval <- as.matrix(data3_val[, -1])  # make sure it it is a matrix
+data3_yval <- as.matrix(data3_val[, 1]) # make sure it it is a matrix
+
+data3_xtrain <- data3[-.index, -1]   #dim(data3_xtrain)
+data3_ytrain <- data3[-.index, 1]   
+data3_xtrain <- as.matrix(data3_xtrain) # make sure it it is a matrix
+data3_ytrain <- as.matrix(data3_ytrain) # make sure it it is a matrix
+
+p <- dim(data3_xtrain)[2] # number of input variables
+model <- keras_model_sequential() %>%
+  layer_dense(units = 16, activation = "relu", input_shape = c(p)) %>% 
+  # 1 layer with 16 neurons. default activation is relu
+  layer_dense(units = 8, activation = "relu") %>%  
+  # layer 2 with 8 neurons
+  layer_dense(units = 2, activation = "softmax") # output
+print(model)
+
+model %>% compile(
+  optimizer = "rmsprop",
+  loss = "sparse_categorical_crossentropy",
+  metrics = c("accuracy")
+)
+
+#retain the nn:
+model <- keras_model_sequential() %>%
+  layer_dense(units = 16, activation = "relu", input_shape = c(p)) %>% 
+  # 1 layer with 16 neurons. default activation is relu
+  layer_dense(units = 8, activation = "relu") %>%  # layer 2 with 8 neurons
+  layer_dense(units = 2, activation = "softmax") # output
+
+model %>% compile(
+  optimizer = "rmsprop",
+  loss = "sparse_categorical_crossentropy",
+  metrics = c("accuracy")
+)
+
+ model %>% fit(data3_xtrain, data3_ytrain, epochs = 6, batch_size = 512)
+ 
+ results <- model %>% evaluate(data3_xval, data3_yval) ; 
+results
+```
+
+## Random Forest
+
+i. Briefly summarize the method of Random Forest
+ii. Now train the data using the training data set by RF and call it fit.rf.
+
+>Random forest is a commonly-used machine learning algorithm, which combines the output of multiple decision trees to reach a single result. It is flexible enough to handle both classification and regression problems.
+
+a) Explain how you tune the tuning parameters (mtry and ntree)
+
+>mtry: Number of variables randomly selected as testing conditions at each split of decision trees. default value is sqr(col). Increasing mtry generally improves the performance of the model as each node has a higher number of options to be considered.
+
+>ntree: Number of trees to grow. the default value is 500. A higher number of trees give you better performance but makes your code slower. 
+
+b) Get the testing error of majority vote.
+
+> this gives 14% testing error
+
+```{r}
+fit.rf <- ranger::ranger(yelp_data.rating~., data2.train, num.trees = 200, importance="impurity")
+fit.rf
+imp <- importance(fit.rf)
+imp[order(imp, decreasing = T)][1:20]
+
+predict.rf <- predict(fit.rf, data=data2.test, type="response")
+mean(data2.test$yelp_data.rating != predict.rf$predictions)
+```
+
+## PCA
+
+i. Perform PCA (better to do sparse PCA) for the input matrix first. Decide how many PC’s you may want to take and why.
+
+ii. Pick up one of your favorite method above and build the predictive model with PC’s. Say you use RandomForest.
+
+iii. What is the testing error? Is this testing error better than that obtained using the original x’s?
+
+>Testing error is 26%. This is worse than using the original X's. 
+
+```{r}
+set.seed(10)
+data1 <- sample_n(data2, size=2000) 
+dim(data1)
+str(data1 [820:826])
+lapply(data1, as.numeric)
+
+
+# Get train/test data 
+
+set.seed(1)
+n=nrow(data1)
+test.index <- sample(n, 0.3*n)
+length(test.index)
+data2.test <- data1[test.index, ] 
+data2.train <- data1[-test.index, ]
+names(data2.train)[1:3]
+dim(data2.train)
+str(data2.train)
+
+#Perform PCA
+
+pc.train <- prcomp(data2.train[, -c(1)])  # Take the rating out
+
+pc.train$center[1:50]
+hist(pc.train$center, breaks=50,
+     col="blue",
+     main="mean frequency of the words")  
+
+pc.train.imp <- t((summary(pc.train))$importance)   
+pc.train.imp <- as.data.frame(pc.train.imp) 
+names(pc.train.imp) <- c("Sdev", "PVE", "CPVE")
+attach(pc.train.imp)
+par(mfrow=c(3,1))
+hist(Sdev)
+plot(PVE, xlim=c(1, 50))
+plot(CPVE, main="Scree plot of CPVE")  
+detach(pc.train.imp)
+
+
+# Extract PC scores
+pc.train.scores <- pc.train$x
+dim(pc.train.scores)
+
+pc.test.scores <- predict(pc.train, data2.test[, -c(1)]) 
+dim(pc.test.scores)
+
+#Perform LASSO with PCA scores
+
+y <- data2.train$yelp_data.rating
+X <- as.matrix(pc.train.scores)    # pc scores for training data
+pca.lasso <- cv.glmnet(X, y, alpha=0, family="binomial")  
+plot(pca.lasso)
+beta.lasso <- coef(pca.lasso, s="lambda.min")   
+beta <- beta.lasso[which(beta.lasso !=0),] 
+beta <- as.matrix(beta);
+beta <- rownames(beta)
+beta[1:20]   
+
+#Testing Errors for LASSO w/ PCA 
+
+predict.glm <- predict(pca.lasso, pc.test.scores, type = "response")
+class.glm <- rep("0", nrow(data2.test))
+class.glm[predict.glm > .5] ="1"
+length(class.glm)
+
+testerror.glm <- mean(data2.test$yelp_data.rating != class.glm)
+testerror.glm
+pROC::roc(data2.test$yelp_data.rating, predict.glm, plot=T)
+
+```
+
+
+## Ensemble model
+i. Take average of some of the models built above (also try all of them) and this gives us the fit.em.
+
+Report its testing error. (Do you have more models to be bagged, try it.)
+
+```{r}
+library(tidyr)
+
+#create an ensemble model 
+
+data4.test <- data2.test
+
+data4.test$glm_pred <- predict(
+result.glm,
+  newdata = data2.test
+)
+
+data4.test$lassopca_pred <- predict(
+pca.lasso, newx = pc.test.scores,
+  newdata = data2.test
+)
+
+X1 <- sparse.model.matrix(yelp_data.rating~., data=data2.test)[, -1]
+
+data4.test$lasso_pred <- predict(
+result.lasso, newx = X1,
+  newdata = data2.test
+)
+
+data4.test$ranger_pred <- predict(
+fit.rf,
+  data = data2.test
+) 
+
+data4.test$lasso_pred <- as.numeric(data4.test$lasso_pred)
+data4.test$lassopca_pred <- as.numeric(data4.test$lassopca_pred)
+data4.test$glm_pred <- as.numeric(data4.test$glm_pred)
+
+fit.em <- data4.test %>% 
+  mutate(equal_weight_pred = (glm_pred + lassopca_pred+ lasso_pred) / 3)
+
+#final model testing errors --> couldn't get this to work with TA
+
+fit.em
+mean(data2.valid$yelp_data.rating != fit.em$equal_weight_pred) 
+
+```
+
+
+## Final model
+Which classifier(s) seem to produce the least testing error? Are you surprised? 
+
+>Couldn't get this to work
+
+Report the final model and accompany the validation error. Once again this is THE only time you use the validation data set.
+
+> Couldn't get this to work
+
+For the purpose of prediction, comment on how would you predict a rating if you are given a review (not a tm output) using our final model?
+
+> Without a model, I would scan the review for positive and negative words to predict the rating. 
 
 
 # Problem 2: IQ and successes
